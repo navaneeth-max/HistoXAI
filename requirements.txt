@@ -1,0 +1,9 @@
+streamlit>=1.35
+torch
+torchvision
+captum
+lime
+scikit-image
+opencv-python-headless
+numpy
+pillow
