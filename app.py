@@ -555,15 +555,28 @@ elif page == "Prediction":
                 if DEVICE.type == "cuda":
                     torch.cuda.empty_cache()
 
-        st.markdown("#### LIME superpixel explanation")
-        st.markdown('<p class="small-note">LIME perturbs image superpixels and estimates which regions support or oppose the selected prediction. This may take some time.</p>', unsafe_allow_html=True)
-        if st.button("Generate LIME explanation"):
-            with st.spinner("Generating class-specific LIME explanation (120 samples)..."):
-                lime_visual, lime_error = lime_explanation(model, rgb_image, preprocess, predicted_idx)
-            if lime_visual is not None:
-                st.image(lime_visual, caption="LIME superpixels: green supports, red opposes the selected class", use_container_width=True)
-            else:
-                st.warning(f"LIME could not be generated: {lime_error}")
+    # Keep LIME outside the Integrated Gradients button block so the option
+    # is always visible after an image prediction.
+    st.markdown("#### LIME superpixel explanation")
+    st.markdown(
+        '<p class="small-note">LIME perturbs image superpixels and estimates '
+        'which regions support or oppose the selected prediction. This may '
+        'take some time.</p>',
+        unsafe_allow_html=True
+    )
+    if st.button("Generate LIME explanation", key="generate_lime"):
+        with st.spinner("Generating class-specific LIME explanation (120 samples)..."):
+            lime_visual, lime_error = lime_explanation(
+                model, rgb_image, preprocess, predicted_idx
+            )
+        if lime_visual is not None:
+            st.image(
+                lime_visual,
+                caption="LIME superpixels: highlighted regions support or oppose the selected class",
+                use_container_width=True
+            )
+        else:
+            st.warning(f"LIME could not be generated: {lime_error}")
 
     summary = {
         "predicted_class": predicted_class,
