@@ -202,42 +202,90 @@ def draw_regions(rgb_image, regions):
     return canvas
 
 def lime_explanation(model, image_rgb, preprocess, target_class):
+    """Create a class-specific LIME explanation using memory-safe inference."""
     try:
         from lime import lime_image
-        from skimage.segmentation import mark_boundaries
-        def predict_fn(images):
-            # Process LIME perturbations in small batches to limit RAM usage.
-            outputs = []
-            chunk_size = 8
-            for start in range(0, len(images), chunk_size):
-                chunk = images[start:start + chunk_size]
-                batch = []
-                for arr in chunk:
-                    pil = Image.fromarray(
-                        np.uint8(np.clip(arr, 0, 1) * 255)
-                    )
-                    batch.append(preprocess(pil).unsqueeze(0))
+        from skimage.segmentation import mark_boundaries, slic
 
-                batch_tensor = torch.cat(batch).to(DEVICE)
+        model.eval()
+
+        def predict_fn(images):
+            # LIME supplies RGB images in the [0, 1] range.
+            outputs = []
+            chunk_size = 4
+
+            for batch_start in range(0, len(images), chunk_size):
+                image_batch = images[batch_start:batch_start + chunk_size]
+                tensors = []
+
+                for image_array in image_batch:
+                    image_array = np.asarray(image_array)
+                    if image_array.dtype != np.uint8:
+                        image_array = np.uint8(
+                            np.clip(image_array, 0.0, 1.0) * 255.0
+                        )
+                    pil = Image.fromarray(image_array).convert("RGB")
+                    tensors.append(preprocess(pil))
+
+                batch_tensor = torch.stack(tensors).to(DEVICE)
+
                 with torch.inference_mode():
-                    logits = get_model_scores(model, batch_tensor)
-                    probabilities = torch.softmax(logits, dim=1)
-                outputs.append(probabilities.cpu().numpy())
-                del batch_tensor, logits, probabilities
+                    scores = get_model_scores(model, batch_tensor)
+                    batch_probabilities = torch.softmax(scores, dim=1)
+
+                outputs.append(batch_probabilities.cpu().numpy())
+                del batch_tensor, scores, batch_probabilities
+
+            if not outputs:
+                raise ValueError("LIME did not provide any perturbed images.")
 
             return np.concatenate(outputs, axis=0)
+
+        # SLIC is generally more predictable and less expensive than the
+        # default quickshift segmentation for hosted CPU environments.
+        def segmentation_fn(image):
+            return slic(
+                image,
+                n_segments=60,
+                compactness=10,
+                sigma=1,
+                start_label=0,
+                channel_axis=-1
+            )
+
+        image_array = np.asarray(image_rgb.convert("RGB"), dtype=np.uint8)
+        lime_input = image_array.astype(np.float32) / 255.0
+
         explainer = lime_image.LimeImageExplainer()
         explanation = explainer.explain_instance(
-            np.asarray(image_rgb).astype(np.float32) / 255.0, predict_fn,
-            top_labels=1, hide_color=0, num_samples=300
+            lime_input,
+            predict_fn,
+            labels=(int(target_class),),
+            top_labels=None,
+            hide_color=0,
+            num_samples=120,
+            batch_size=4,
+            segmentation_fn=segmentation_fn,
+            random_seed=42
         )
-        label = explanation.top_labels[0]
+
         temp, mask = explanation.get_image_and_mask(
-            label, positive_only=False, num_features=8, hide_rest=False
+            int(target_class),
+            positive_only=False,
+            num_features=8,
+            hide_rest=False
         )
-        return mark_boundaries(temp, mask), None
+
+        visual = mark_boundaries(
+            np.clip(temp, 0.0, 1.0),
+            mask,
+            color=(1, 0, 0),
+            mode="thick"
+        )
+        return np.asarray(visual, dtype=np.float32), None
+
     except Exception as exc:
-        return None, str(exc)
+        return None, f"{type(exc).__name__}: {exc}"
 
 # ----------------------------- Page: Overview -----------------------------
 if page == "Overview":
@@ -510,7 +558,7 @@ elif page == "Prediction":
         st.markdown("#### LIME superpixel explanation")
         st.markdown('<p class="small-note">LIME perturbs image superpixels and estimates which regions support or oppose the selected prediction. This may take some time.</p>', unsafe_allow_html=True)
         if st.button("Generate LIME explanation"):
-            with st.spinner("Generating LIME explanation (300 perturbation samples)..."):
+            with st.spinner("Generating class-specific LIME explanation (120 samples)..."):
                 lime_visual, lime_error = lime_explanation(model, rgb_image, preprocess, predicted_idx)
             if lime_visual is not None:
                 st.image(lime_visual, caption="LIME superpixels: green supports, red opposes the selected class", use_container_width=True)
